@@ -11,12 +11,13 @@ from fastapi import (
     FastAPI,
     File,
     HTTPException,
+    Request,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -87,6 +88,17 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def admin_bearer_auth_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
+    settings = get_settings()
+    admin_key = settings.admin_api_key.get_secret_value().strip()
+    if admin_key and request.url.path.startswith("/api/v1/"):
+        auth_hdr = request.headers.get("Authorization", "")
+        if auth_hdr != f"Bearer {admin_key}":
+            return JSONResponse(status_code=401, content={"detail": "Invalid or missing Bearer token"})
+    return await call_next(request)
+
+
 def get_db():  # type: ignore[no-untyped-def]
     factory = get_session_factory()
     with factory() as session:
@@ -116,6 +128,21 @@ class BuilderTurnRequest(BaseModel):
 
 class AutonomyChangeRequest(BaseModel):
     autonomy_level: Literal["L0", "L1", "L2", "L3"]
+
+
+class ModuleOverrideRequest(BaseModel):
+    module_name: str
+    provider_id: str = ""
+
+
+class GPUControlRequest(BaseModel):
+    action: Literal["wake", "sleep", "set_mode"] = "wake"
+    mode: Literal["on_demand", "always_on", "hourly_rental"] = "on_demand"
+
+
+class SandboxTestRequest(BaseModel):
+    media_path: str = "sandbox_probe.mp4"
+    caption: str = "انتشار آزمایشی سندباکس هویتا — شخصیت هوش مصنوعی"
 
 
 class EmergencyToggleRequest(BaseModel):
@@ -298,7 +325,111 @@ def api_set_autonomy(
 @app.get("/api/v1/modules")
 def api_list_modules() -> dict[str, Any]:
     reg = _get_registry()
-    return {mod: [m.model_dump(mode="json") for m in metas] for mod, metas in reg.list_providers().items()}
+    overrides = reg.list_overrides()
+    return {
+        "modules": {
+            mod: [
+                {**m.model_dump(mode="json"), "active_override": overrides.get(mod) == m.provider_id}
+                for m in metas
+            ]
+            for mod, metas in reg.list_providers().items()
+        },
+        "active_overrides": overrides,
+    }
+
+
+@app.post("/api/v1/modules/override")
+def api_override_module(
+    body: ModuleOverrideRequest, session: Session = Depends(get_db)
+) -> dict[str, Any]:
+    reg = _get_registry()
+    profile = session.execute(select(CharacterProfile).limit(1)).scalar_one()
+    if not body.provider_id.strip():
+        reg.clear_override(body.module_name)
+    else:
+        try:
+            reg.set_override(body.module_name, body.provider_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    append_audit_log(
+        session,
+        character_id=profile.id,
+        actor="human_dashboard",
+        action="module_provider_swapped",
+        resource_type="module_registry",
+        resource_id=body.module_name,
+        details={"provider_id": body.provider_id or "auto_free_first"},
+    )
+    return {"module_name": body.module_name, "active_override": body.provider_id or None}
+
+
+@app.post("/api/v1/system/pause")
+def api_pause_persona(session: Session = Depends(get_db)) -> dict[str, Any]:
+    profile = session.execute(select(CharacterProfile).limit(1)).scalar_one()
+    profile.status = "paused"
+    session.commit()
+    append_audit_log(
+        session,
+        character_id=profile.id,
+        actor="human_dashboard",
+        action="persona_paused",
+        resource_type="character_profile",
+        resource_id=profile.id,
+        details={},
+    )
+    return {"status": profile.status}
+
+
+@app.post("/api/v1/system/resume")
+def api_resume_persona(session: Session = Depends(get_db)) -> dict[str, Any]:
+    profile = session.execute(select(CharacterProfile).limit(1)).scalar_one()
+    profile.status = "active"
+    session.commit()
+    append_audit_log(
+        session,
+        character_id=profile.id,
+        actor="human_dashboard",
+        action="persona_resumed",
+        resource_type="character_profile",
+        resource_id=profile.id,
+        details={},
+    )
+    return {"status": profile.status}
+
+
+@app.post("/api/v1/system/gpu")
+def api_control_gpu(
+    body: GPUControlRequest, session: Session = Depends(get_db)
+) -> dict[str, Any]:
+    profile = session.execute(select(CharacterProfile).limit(1)).scalar_one()
+    gpu = _get_gpu()
+    if body.action == "wake":
+        st = gpu.wake(session, character_id=profile.id, reason="manual_dashboard")
+    elif body.action == "sleep":
+        st = gpu.sleep(session, character_id=profile.id, reason="manual_dashboard")
+    else:
+        st = gpu.set_mode(session, character_id=profile.id, mode=body.mode)
+    return st.model_dump(mode="json")
+
+
+@app.post("/api/v1/social/sandbox-test")
+async def api_social_sandbox_test(
+    body: SandboxTestRequest, session: Session = Depends(get_db)
+) -> dict[str, Any]:
+    profile = session.execute(select(CharacterProfile).limit(1)).scalar_one()
+    conn = SocialConnector(_get_registry())
+    return await conn.sandbox_test_publish(
+        session, character_id=profile.id, media_path=body.media_path, caption=body.caption
+    )
+
+
+@app.post("/api/v1/social/sync-metrics")
+async def api_social_sync_metrics(session: Session = Depends(get_db)) -> dict[str, Any]:
+    from hovita.scheduler.runner import InternalScheduler
+
+    profile = session.execute(select(CharacterProfile).limit(1)).scalar_one()
+    sched = InternalScheduler(_get_registry())
+    return await sched.sync_official_metrics(session, character_id=profile.id)
 
 
 @app.get("/api/v1/persona")

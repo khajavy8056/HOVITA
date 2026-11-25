@@ -101,8 +101,24 @@ class SearXNGLocalResearchProvider:
                     )
                 )
             else:
-                extracted = f"Extracted structured content for {u}"
-                scan = scan_external_content(extracted, source=u)
+                raw_text = ""
+                if settings.hovita_env != "test" and u.startswith("http"):
+                    try:
+                        if self._client is not None:
+                            r = await self._client.get(u, timeout=6.0)
+                        else:
+                            async with httpx.AsyncClient(timeout=6.0) as client:
+                                r = await client.get(u)
+                        if r.status_code == 200:
+                            import re
+
+                            raw_text = re.sub(r"<[^>]+>", " ", r.text)
+                            raw_text = " ".join(raw_text.split())[:3000]
+                    except Exception:
+                        raw_text = ""
+                if not raw_text:
+                    raw_text = f"Extracted structured content for {u}"
+                scan = scan_external_content(raw_text, source=u)
                 _set_cached_url(u, scan.sanitized_text)
                 sources.append(
                     ResearchSource(

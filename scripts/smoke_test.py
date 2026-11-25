@@ -30,7 +30,7 @@ def main() -> int:
 
         mods = client.get("/api/v1/modules")
         assert mods.status_code == 200
-        assert len(mods.json()) == 12
+        assert len(mods.json()["modules"]) == 12
 
         builder = client.post(
             "/api/v1/persona/builder",

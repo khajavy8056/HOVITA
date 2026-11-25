@@ -177,17 +177,38 @@ class ComfyUILocalImageProvider:
         out_path = storage.resolve_path(obj_key)
         warnings: list[str] = []
 
-        # Attempt ComfyUI API if reachable
+        # Attempt ComfyUI prompt queue + PNG fetch when local ComfyUI server is reachable
         comfy_ok = False
         try:
-            url = f"{settings.comfyui_base_url.rstrip('/')}/system_stats"
+            base_url = settings.comfyui_base_url.rstrip("/")
             if self._client is not None:
-                resp = await self._client.get(url, timeout=1.5)
+                resp = await self._client.get(f"{base_url}/system_stats", timeout=1.5)
             else:
                 async with httpx.AsyncClient(timeout=1.5) as client:
-                    resp = await client.get(url)
+                    resp = await client.get(f"{base_url}/system_stats")
             if resp.status_code == 200:
-                comfy_ok = True
+                workflow_payload = {
+                    "prompt": {
+                        "1": {
+                            "class_type": "CLIPTextEncode",
+                            "inputs": {
+                                "text": f"{payload.locked_physical_prompt}, {payload.prompt}, angle={payload.angle}"
+                            },
+                        },
+                        "2": {
+                            "class_type": "KSampler",
+                            "inputs": {"seed": payload.seed, "steps": 8, "cfg": 3.5},
+                        },
+                    }
+                }
+                if self._client is not None:
+                    q_resp = await self._client.post(
+                        f"{base_url}/prompt", json=workflow_payload, timeout=5.0
+                    )
+                else:
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        q_resp = await client.post(f"{base_url}/prompt", json=workflow_payload)
+                comfy_ok = q_resp.status_code in {200, 202}
         except Exception:
             comfy_ok = False
 

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 
 type TabKey =
   | "onboarding"
@@ -31,7 +31,7 @@ interface SystemStatus {
     budget_exhausted: boolean;
   };
   gpu: {
-    mode: string;
+    mode: "on_demand" | "always_on" | "hourly_rental";
     state: string;
     gpu_available: boolean;
     idle_sleep_minutes: number;
@@ -79,19 +79,35 @@ interface PendingApproval {
   assets: Record<string, string>;
 }
 
+interface ModuleProviderMeta {
+  provider_id: string;
+  display_name: string;
+  tier: string;
+  degradation_level: string;
+  active_override?: boolean;
+}
+
+function mediaUrl(filePath?: string | null): string {
+  if (!filePath) return "";
+  return `/api/v1/media?path=${encodeURIComponent(filePath)}`;
+}
+
 export default function HovitaDashboard() {
   const [tab, setTab] = useState<TabKey>("onboarding");
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [personaData, setPersonaData] = useState<Record<string, unknown> | null>(null);
+  const [behaviorSamples, setBehaviorSamples] = useState<Array<Record<string, unknown>>>([]);
   const [steps, setSteps] = useState<OnboardingStep[]>([]);
   const [products, setProducts] = useState<Array<Record<string, unknown>>>([]);
   const [accounts, setAccounts] = useState<Array<Record<string, unknown>>>([]);
   const [contents, setContents] = useState<ContentRecord[]>([]);
   const [pending, setPending] = useState<PendingApproval[]>([]);
+  const [captionEdits, setCaptionEdits] = useState<Record<string, string>>({});
   const [costs, setCosts] = useState<Record<string, unknown> | null>(null);
   const [decisions, setDecisions] = useState<Array<Record<string, unknown>>>([]);
   const [logs, setLogs] = useState<Array<Record<string, unknown>>>([]);
-  const [modules, setModules] = useState<Record<string, Array<Record<string, unknown>>>>({});
+  const [modules, setModules] = useState<Record<string, ModuleProviderMeta[]>>({});
+  const [activeOverrides, setActiveOverrides] = useState<Record<string, string>>({});
 
   const [busy, setBusy] = useState(false);
   const [banner, setBanner] = useState<string>("");
@@ -104,12 +120,14 @@ export default function HovitaDashboard() {
   const [builderResp, setBuilderResp] = useState<Record<string, unknown> | null>(null);
   const [refinementNote, setRefinementNote] = useState("");
   const [voiceLang, setVoiceLang] = useState<"fa" | "en">("fa");
+  const [voiceResult, setVoiceResult] = useState<Record<string, unknown> | null>(null);
   const [introVideo, setIntroVideo] = useState<Record<string, unknown> | null>(null);
 
   const [prodSku, setProdSku] = useState("PRF-001");
   const [prodName, setProdName] = useState("عطر رز هویتا ۱۰۰ میل");
   const [prodPrice, setProdPrice] = useState("65");
   const [prodStock, setProdStock] = useState("25");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [socialPlatform, setSocialPlatform] = useState<"instagram" | "tiktok" | "youtube">("instagram");
   const [socialHandle, setSocialHandle] = useState("@hovita_persona");
@@ -121,10 +139,16 @@ export default function HovitaDashboard() {
   const [learningReport, setLearningReport] = useState<Record<string, unknown> | null>(null);
 
   const [chatInput, setChatInput] = useState("این ترند جدید عطر را بررسی کن");
-  const [chatHistory, setChatHistory] = useState<Array<{ role: string; text: string }>>([]);
+  const [chatAttachUrl, setChatAttachUrl] = useState("");
+  const [chatHistory, setChatHistory] = useState<
+    Array<{ role: string; text: string; audioPath?: string | null }>
+  >([]);
+
   const [callInput, setCallInput] = useState("برنامه هفته آینده روی فروش عطر تمرکز کنه");
   const [callResult, setCallResult] = useState<Record<string, unknown> | null>(null);
   const [livekitInfo, setLivekitInfo] = useState<Record<string, unknown> | null>(null);
+  const [wsConnected, setWsConnected] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
 
   const apiCall = useCallback(async (url: string, init?: RequestInit) => {
     const res = await fetch(url, {
@@ -166,7 +190,8 @@ export default function HovitaDashboard() {
       setCosts(cst);
       setDecisions(dec.decisions || []);
       setLogs(lg.logs || []);
-      setModules(mod);
+      setModules(mod.modules || {});
+      setActiveOverrides(mod.active_overrides || {});
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "خطا در دریافت وضعیت سامانه");
     }
@@ -174,6 +199,9 @@ export default function HovitaDashboard() {
 
   useEffect(() => {
     void refreshAll();
+    return () => {
+      wsRef.current?.close();
+    };
   }, [refreshAll]);
 
   async function runAction(label: string, fn: () => Promise<void>) {
@@ -191,6 +219,33 @@ export default function HovitaDashboard() {
     }
   }
 
+  function connectLiveWebSocket() {
+    if (typeof window === "undefined") return;
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    // Route directly to API host/port if on 3000, or relative host
+    const apiHost = window.location.port === "3000" ? `${window.location.hostname}:8000` : window.location.host;
+    const ws = new WebSocket(`${proto}//${apiHost}/ws/live-call/web-ws-call`);
+    ws.onopen = () => setWsConnected(true);
+    ws.onclose = () => setWsConnected(false);
+    ws.onmessage = (evt) => {
+      try {
+        const parsed = JSON.parse(evt.data);
+        setCallResult(parsed);
+      } catch {
+        // ignore malformed frame
+      }
+    };
+    wsRef.current = ws;
+  }
+
+  const refImages = (
+    ((personaData?.identity_assets as Array<Record<string, unknown>>) || []).filter(
+      (a) => a.kind === "ref_image"
+    )
+  );
+  const frontPortraitPath = refImages[0]?.path ? String(refImages[0].path) : "";
+
   return (
     <div className="container">
       {/* Top Control & Emergency Kill Switch Bar */}
@@ -201,16 +256,20 @@ export default function HovitaDashboard() {
           </h1>
           <div style={{ fontSize: "0.84rem", color: "var(--muted)" }}>
             شناسه نصب تک‌شخصیتی:{" "}
-            <span className="mono">{status?.character.id || "..."}</span> | شغل:{" "}
-            <strong>{status?.character.job || "..."}</strong> | سیاست:{" "}
-            <span className="mono">{status?.free_first_policy || "free_first"}</span>
+            <span className="mono">{status?.character.id || "..."}</span> | وضعیت:{" "}
+            <strong>{status?.character.status || "..."}</strong> | شغل:{" "}
+            <strong>{status?.character.job || "..."}</strong>
           </div>
         </div>
 
         <div className="status-pills">
-          <span className="pill green" data-testid="budget-pill">
+          <span
+            className={`pill ${status?.budget.warning_80pct ? "amber" : "green"}`}
+            data-testid="budget-pill"
+          >
             بودجه روزانه: ${status?.budget.daily_spend_usd.toFixed(3) || "0.000"} / $
-            {status?.budget.daily_budget_usd.toFixed(2) || "3.00"}
+            {status?.budget.daily_budget_usd.toFixed(2) || "3.00"} (
+            {status?.budget.utilization_pct.toFixed(0) || 0}%)
           </span>
           <span className="pill">
             GPU: {status?.gpu.state || "sleeping"} ({status?.gpu.mode || "on_demand"})
@@ -238,6 +297,34 @@ export default function HovitaDashboard() {
             <option value="L2">L2 · زمان‌بندی خودکار</option>
             <option value="L3">L3 · خودمختار کامل</option>
           </select>
+
+          {status?.character.status === "paused" ? (
+            <button
+              className="btn btn-secondary"
+              data-testid="resume-persona-btn"
+              disabled={busy}
+              onClick={() =>
+                void runAction("فعالیت شخصیت از سر گرفته شد", async () => {
+                  await apiCall("/api/v1/system/resume", { method: "POST" });
+                })
+              }
+            >
+              ادامه فعالیت
+            </button>
+          ) : (
+            <button
+              className="btn btn-secondary"
+              data-testid="pause-persona-btn"
+              disabled={busy}
+              onClick={() =>
+                void runAction("فعالیت شخصیت موقتاً مکث شد", async () => {
+                  await apiCall("/api/v1/system/pause", { method: "POST" });
+                })
+              }
+            >
+              مکث شخصیت
+            </button>
+          )}
 
           {status?.character.emergency_stop ? (
             <button
@@ -286,7 +373,7 @@ export default function HovitaDashboard() {
             label: `۴. خط تولید، QA و صف تایید (${pending.length})`,
           },
           { key: "live", label: "۵. چت مستقیم و تماس زنده" },
-          { key: "economy", label: "۶. هزینه‌ها، یادگیری و امنیت" },
+          { key: "economy", label: "۶. هزینه‌ها، ماژول‌ها و امنیت" },
         ].map((item) => (
           <button
             key={item.key}
@@ -299,7 +386,7 @@ export default function HovitaDashboard() {
         ))}
       </nav>
 
-      {/* TAB 1: Conversational Builder + 8-Step Onboarding */}
+      {/* TAB 1: Conversational Builder + 8-Step Onboarding + F04 Samples */}
       {tab === "onboarding" && (
         <div className="grid-2">
           <section className="card">
@@ -311,7 +398,7 @@ export default function HovitaDashboard() {
               value={builderMsg}
               onChange={(e) => setBuilderMsg(e.target.value)}
             />
-            <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               <button
                 className="btn btn-primary"
                 data-testid="builder-submit-btn"
@@ -335,7 +422,7 @@ export default function HovitaDashboard() {
                 className="btn btn-secondary"
                 disabled={busy}
                 onClick={() =>
-                  void runAction("تکمیل سریع پروفایل نمونه", async () => {
+                  void runAction("تکمیل سریع پروفایل و بریف JSON", async () => {
                     const res = await apiCall("/api/v1/persona/builder", {
                       method: "POST",
                       body: JSON.stringify({
@@ -355,6 +442,18 @@ export default function HovitaDashboard() {
               >
                 نهایی‌سازی ساختار JSON
               </button>
+              <button
+                className="btn btn-secondary"
+                disabled={busy}
+                onClick={() =>
+                  void runAction("۵ نمونه رفتاری و خط قرمز بررسی شدند", async () => {
+                    const res = await apiCall("/api/v1/persona/behavior-samples");
+                    setBehaviorSamples(res.samples || []);
+                  })
+                }
+              >
+                آزمون ۵ نمونه رفتاری (F04)
+              </button>
             </div>
             {builderResp && (
               <pre
@@ -370,6 +469,19 @@ export default function HovitaDashboard() {
               >
                 {JSON.stringify(builderResp, null, 2)}
               </pre>
+            )}
+            {behaviorSamples.length > 0 && (
+              <div style={{ marginTop: 12 }}>
+                <h3>نمونه‌های آزمون سبک و خطوط قرمز (F04)</h3>
+                {behaviorSamples.map((s, idx) => (
+                  <div key={idx} className="alert" style={{ marginBottom: 6 }}>
+                    <strong>{String(s.scenario)}:</strong> {String(s.sample_text)}{" "}
+                    <span className={`pill ${s.passed_style_gate ? "green" : "red"}`}>
+                      {s.passed_style_gate ? "✅ سبز" : "❌ خطا"}
+                    </span>
+                  </div>
+                ))}
+              </div>
             )}
           </section>
 
@@ -394,7 +506,7 @@ export default function HovitaDashboard() {
         </div>
       )}
 
-      {/* TAB 2: Identity Studio, Voice, Environment & Products */}
+      {/* TAB 2: Identity Studio, Visual Gallery, Voice Player, Intro Video, Products CSV/XLSX */}
       {tab === "identity" && (
         <div className="grid-2">
           <section className="card">
@@ -436,11 +548,12 @@ export default function HovitaDashboard() {
                 className="btn btn-secondary"
                 disabled={busy}
                 onClick={() =>
-                  void runAction("کلون صدا با ۳ نمونه آزمایشی قفل شد", async () => {
-                    await apiCall("/api/v1/identity/voice-audition", {
+                  void runAction("۳ نمونه صدا ساخته و کلون صدا قفل شد", async () => {
+                    const res = await apiCall("/api/v1/identity/voice-audition", {
                       method: "POST",
                       body: JSON.stringify({ language: voiceLang, selected_energy: "balanced", approve: true }),
                     });
+                    setVoiceResult(res);
                   })
                 }
               >
@@ -451,7 +564,7 @@ export default function HovitaDashboard() {
                 className="btn btn-secondary"
                 disabled={busy}
                 onClick={() =>
-                  void runAction("ویدیوی معرفی پیش‌نمایش (F06) تولید شد", async () => {
+                  void runAction("ویدیوی معرفی پیش‌نمایش (F06) آماده پخش است", async () => {
                     const res = await apiCall("/api/v1/identity/intro-preview", { method: "POST" });
                     setIntroVideo(res);
                   })
@@ -462,33 +575,57 @@ export default function HovitaDashboard() {
             </div>
 
             {introVideo && typeof introVideo.preview_mp4_path === "string" && (
-              <div className="alert">
-                ویدیوی پیش‌نمایش آماده با C2PA تاییدشده:{" "}
-                <span className="mono">{introVideo.preview_mp4_path}</span>
+              <div style={{ marginBottom: 14 }}>
+                <h3>پیش‌نمایش نهایی قبل از شروع فعالیت (F06)</h3>
+                <video
+                  controls
+                  style={{ width: "100%", maxHeight: 320, borderRadius: 10, background: "#000" }}
+                  src={mediaUrl(introVideo.preview_mp4_path)}
+                />
               </div>
             )}
 
-            <h3>دارایی‌های هویت ثبت‌شده</h3>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>نوع</th>
-                  <th>زاویه</th>
-                  <th>ArcFace</th>
-                  <th>وضعیت</th>
-                </tr>
-              </thead>
-              <tbody>
-                {((personaData?.identity_assets as Array<Record<string, unknown>>) || []).map((a) => (
-                  <tr key={String(a.id)}>
-                    <td>{String(a.kind)}</td>
-                    <td>{String(a.angle)}</td>
-                    <td className="mono">{Number(a.arcface_score).toFixed(3)}</td>
-                    <td>{a.approved ? "قفل‌شده" : "پیش‌نویس"}</td>
-                  </tr>
+            {voiceResult && Array.isArray(voiceResult.candidates) && (
+              <div style={{ marginBottom: 14 }}>
+                <h3>نمونه‌های صدا (F03 · قفل: {String(voiceResult.voice_id)})</h3>
+                {(voiceResult.candidates as Array<Record<string, unknown>>).map((c) => (
+                  <div key={String(c.voice_id)} style={{ marginBottom: 8 }}>
+                    <span className="mono" style={{ fontSize: "0.8rem" }}>
+                      {String(c.energy)} ({String(c.duration_sec)}s):
+                    </span>
+                    <audio
+                      controls
+                      style={{ width: "100%", height: 34, marginTop: 4 }}
+                      src={mediaUrl(String(c.sample_path))}
+                    />
+                  </div>
                 ))}
-              </tbody>
-            </table>
+              </div>
+            )}
+
+            <h3>گالری ۶ زاویه چهره تثبیت‌شده</h3>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+              {refImages.slice(-6).map((a) => (
+                <div
+                  key={String(a.id)}
+                  style={{
+                    background: "var(--bg)",
+                    borderRadius: 10,
+                    padding: 6,
+                    border: "1px solid var(--border)",
+                  }}
+                >
+                  <img
+                    src={mediaUrl(String(a.path))}
+                    alt={String(a.angle)}
+                    style={{ width: "100%", height: 110, objectFit: "cover", borderRadius: 6 }}
+                  />
+                  <div style={{ fontSize: "0.75rem", marginTop: 4 }} className="mono">
+                    {String(a.angle)} · {Number(a.arcface_score).toFixed(2)}
+                  </div>
+                </div>
+              ))}
+            </div>
           </section>
 
           <section className="card">
@@ -499,7 +636,7 @@ export default function HovitaDashboard() {
               <input className="input" value={prodPrice} onChange={(e) => setProdPrice(e.target.value)} placeholder="قیمت $" />
               <input className="input" value={prodStock} onChange={(e) => setProdStock(e.target.value)} placeholder="موجودی" />
             </div>
-            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
               <button
                 className="btn btn-primary"
                 disabled={busy}
@@ -518,8 +655,32 @@ export default function HovitaDashboard() {
                   })
                 }
               >
-                ثبت محصول
+                ثبت دستی محصول
               </button>
+
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv,.xlsx"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  void runAction("کاتالوگ اکسل/CSV با موفقیت وارد شد", async () => {
+                    const fd = new FormData();
+                    fd.append("file", file);
+                    await apiCall("/api/v1/products/import", { method: "POST", body: fd });
+                  });
+                }}
+              />
+              <button
+                className="btn btn-secondary"
+                disabled={busy}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                ورود گروهی CSV / XLSX
+              </button>
+
               <button
                 className="btn btn-secondary"
                 disabled={busy}
@@ -589,7 +750,7 @@ export default function HovitaDashboard() {
               onChange={(e) => setSocialHandle(e.target.value)}
               placeholder="@handle"
             />
-            <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               <button
                 className="btn btn-primary"
                 disabled={busy}
@@ -626,15 +787,27 @@ export default function HovitaDashboard() {
               >
                 ممیزی پیج (F08)
               </button>
+              <button
+                className="btn btn-secondary"
+                disabled={busy}
+                onClick={() =>
+                  void runAction("انتشار آزمایشی در سندباکس و همگام‌سازی متریک انجام شد", async () => {
+                    await apiCall("/api/v1/social/sandbox-test", { method: "POST", body: JSON.stringify({}) });
+                    await apiCall("/api/v1/social/sync-metrics", { method: "POST" });
+                  })
+                }
+              >
+                تست سندباکس + خواندن آمار
+              </button>
             </div>
 
-            <h3 style={{ marginTop: 14 }}>حساب‌های متصل</h3>
+            <h3 style={{ marginTop: 14 }}>حساب‌های متصل و وضعیت انقضای توکن</h3>
             <table className="table">
               <thead>
                 <tr>
                   <th>پلتفرم</th>
                   <th>شناسه</th>
-                  <th>وضعیت</th>
+                  <th>انقضای توکن</th>
                   <th>انتشار امروز</th>
                 </tr>
               </thead>
@@ -643,7 +816,11 @@ export default function HovitaDashboard() {
                   <tr key={String(a.id)}>
                     <td>{String(a.platform)}</td>
                     <td className="mono">{String(a.handle)}</td>
-                    <td>{String(a.status)}</td>
+                    <td>
+                      <span className={`pill ${a.expiring_soon_warning ? "red" : "green"}`}>
+                        {a.hours_until_expiry ? `${String(a.hours_until_expiry)}h` : "فعال"}
+                      </span>
+                    </td>
                     <td className="mono">{String(a.daily_publish_count)}</td>
                   </tr>
                 ))}
@@ -678,7 +855,7 @@ export default function HovitaDashboard() {
         </div>
       )}
 
-      {/* TAB 4: Production Pipeline, 7 QA Gates & Human Approval Queue */}
+      {/* TAB 4: Production Pipeline, 7 QA Gates & Editable Approval Queue */}
       {tab === "production" && (
         <div className="grid-2">
           <section className="card">
@@ -743,7 +920,7 @@ export default function HovitaDashboard() {
               </div>
             )}
 
-            <h3>صف تایید انسانی (L1 / محتوای حساس)</h3>
+            <h3>صف تایید انسانی (امکان ویرایش کپشن پیش از انتشار)</h3>
             {pending.length === 0 ? (
               <p style={{ color: "var(--muted)" }}>موردی در انتظار تایید نیست.</p>
             ) : (
@@ -759,7 +936,21 @@ export default function HovitaDashboard() {
                   }}
                 >
                   <strong>{p.title}</strong>
-                  <p style={{ fontSize: "0.84rem", color: "var(--muted)" }}>{p.caption}</p>
+                  {p.assets?.final_mp4 && (
+                    <video
+                      controls
+                      style={{ width: "100%", maxHeight: 220, borderRadius: 8, margin: "8px 0", background: "#000" }}
+                      src={mediaUrl(p.assets.final_mp4)}
+                    />
+                  )}
+                  <textarea
+                    className="textarea"
+                    rows={2}
+                    value={captionEdits[p.content_id] ?? p.caption}
+                    onChange={(e) =>
+                      setCaptionEdits((prev) => ({ ...prev, [p.content_id]: e.target.value }))
+                    }
+                  />
                   <div style={{ display: "flex", gap: 8 }}>
                     <button
                       className="btn btn-primary"
@@ -769,7 +960,11 @@ export default function HovitaDashboard() {
                         void runAction("تایید و انتشار رسمی با موفقیت انجام شد", async () => {
                           await apiCall(`/api/v1/approvals/${p.content_id}/decide`, {
                             method: "POST",
-                            body: JSON.stringify({ decision: "approved", comment: "تایید مدیر" }),
+                            body: JSON.stringify({
+                              decision: "approved",
+                              comment: "تایید مدیر",
+                              edited_caption: captionEdits[p.content_id] ?? p.caption,
+                            }),
                           });
                         })
                       }
@@ -814,6 +1009,13 @@ export default function HovitaDashboard() {
                     {c.status}
                   </span>
                 </div>
+                {c.assets?.final_mp4 && (
+                  <video
+                    controls
+                    style={{ width: "100%", maxHeight: 200, borderRadius: 8, margin: "8px 0", background: "#000" }}
+                    src={mediaUrl(c.assets.final_mp4)}
+                  />
+                )}
                 <div style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "6px 0" }}>
                   پلتفرم: {c.platform} | C2PA: {c.c2pa_verified ? "✅ تاییدشده" : "❌"} | AI Label:{" "}
                   {c.ai_disclosure_applied ? "✅ فعال" : "❌"}
@@ -838,7 +1040,7 @@ export default function HovitaDashboard() {
         </div>
       )}
 
-      {/* TAB 5: Direct Chat (F16) & Live Call (F17) */}
+      {/* TAB 5: Direct Chat (F16) with Audio+Attachment & WebSocket Live Call (F17) */}
       {tab === "live" && (
         <div className="grid-2">
           <section className="card">
@@ -855,9 +1057,16 @@ export default function HovitaDashboard() {
               }}
             >
               {chatHistory.map((m, idx) => (
-                <div key={idx} style={{ marginBottom: 8 }}>
+                <div key={idx} style={{ marginBottom: 10 }}>
                   <strong>{m.role === "user" ? "شما" : status?.character.name || "شخصیت"}: </strong>
                   <span>{m.text}</span>
+                  {m.audioPath && (
+                    <audio
+                      controls
+                      style={{ width: "100%", height: 32, marginTop: 4 }}
+                      src={mediaUrl(m.audioPath)}
+                    />
+                  )}
                 </div>
               ))}
             </div>
@@ -866,6 +1075,12 @@ export default function HovitaDashboard() {
               data-testid="direct-chat-input"
               value={chatInput}
               onChange={(e) => setChatInput(e.target.value)}
+            />
+            <input
+              className="input"
+              placeholder="پیوست لینک/مرجع (اختیاری، مثلاً https://instagram.com/reel/...)"
+              value={chatAttachUrl}
+              onChange={(e) => setChatAttachUrl(e.target.value)}
             />
             <button
               className="btn btn-primary"
@@ -879,12 +1094,13 @@ export default function HovitaDashboard() {
                       session_id: "web-chat-1",
                       message: chatInput,
                       with_voice: true,
+                      attachments: chatAttachUrl ? [{ type: "link", url: chatAttachUrl }] : [],
                     }),
                   });
                   setChatHistory((prev) => [
                     ...prev,
                     { role: "user", text: chatInput },
-                    { role: "persona", text: res.reply },
+                    { role: "persona", text: res.reply, audioPath: res.audio_path },
                   ]);
                 })
               }
@@ -894,19 +1110,36 @@ export default function HovitaDashboard() {
           </section>
 
           <section className="card">
-            <h2>تماس صوتی/تصویری زنده چهره به چهره (F17 · تاخیر زیر ۲ ثانیه)</h2>
-            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <h2>تماس زنده چهره به چهره (F17 · WebRTC / WebSocket &lt; 2s)</h2>
+            {frontPortraitPath && (
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+                <img
+                  src={mediaUrl(frontPortraitPath)}
+                  alt="Avatar"
+                  style={{ width: 76, height: 76, borderRadius: "50%", objectFit: "cover", border: "2px solid var(--primary)" }}
+                />
+                <div style={{ fontSize: "0.84rem" }}>
+                  <div><strong>{status?.character.name}</strong></div>
+                  <div className="mono" style={{ color: "var(--muted)" }}>
+                    WebSocket: {wsConnected ? "🟢 Connected" : "⚪ Ready"}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
               <button
                 className="btn btn-secondary"
                 disabled={busy}
                 onClick={() =>
-                  void runAction("اتاق WebRTC LiveKit آماده اتصال شد", async () => {
+                  void runAction("اتاق WebRTC LiveKit آماده و WebSocket متصل شد", async () => {
                     const tok = await apiCall("/api/v1/live-call/token", { method: "POST" });
                     setLivekitInfo(tok);
+                    connectLiveWebSocket();
                   })
                 }
               >
-                ایجاد اتاق تماس LiveKit
+                شروع تماس زنده LiveKit + WS
               </button>
             </div>
             {livekitInfo && (
@@ -919,12 +1152,35 @@ export default function HovitaDashboard() {
               value={callInput}
               onChange={(e) => setCallInput(e.target.value)}
             />
-            <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               <button
                 className="btn btn-primary"
                 disabled={busy}
+                onClick={() => {
+                  if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(JSON.stringify({ utterance: callInput, end_call: false }));
+                  } else {
+                    void runAction("نوبت مکالمه زنده پاسخ داده شد", async () => {
+                      const res = await apiCall("/api/v1/live-call/turn", {
+                        method: "POST",
+                        body: JSON.stringify({
+                          session_id: "web-live-call",
+                          utterance: callInput,
+                          end_call_and_summarize: false,
+                        }),
+                      });
+                      setCallResult(res);
+                    });
+                  }
+                }}
+              >
+                ارسال گفتار زنده
+              </button>
+              <button
+                className="btn btn-secondary"
+                disabled={busy}
                 onClick={() =>
-                  void runAction("نوبت مکالمه زنده پاسخ داده شد", async () => {
+                  void runAction("تماس پایان یافت و خلاصه در حافظه ثبت شد", async () => {
                     const res = await apiCall("/api/v1/live-call/turn", {
                       method: "POST",
                       body: JSON.stringify({
@@ -937,15 +1193,25 @@ export default function HovitaDashboard() {
                   })
                 }
               >
-                ارسال گفتار + ذخیره خلاصه در حافظه
+                پایان تماس و ثبت خلاصه در حافظه
               </button>
             </div>
             {callResult && (
               <div className="alert" style={{ marginTop: 12 }}>
                 <div>پاسخ شخصیت: {String(callResult.reply)}</div>
+                {typeof callResult.audio_path === "string" && (
+                  <audio
+                    controls
+                    style={{ width: "100%", height: 34, marginTop: 6 }}
+                    src={mediaUrl(callResult.audio_path)}
+                  />
+                )}
                 <div className="mono" style={{ marginTop: 6, fontSize: "0.8rem" }}>
                   Latency: {String(callResult.latency_ms)} ms | SLA (&lt;2s):{" "}
                   {callResult.within_2s_sla ? "✅ PASS" : "⚠️"}
+                  {callResult.call_summary_memory_id
+                    ? ` | Memory ID: ${String(callResult.call_summary_memory_id)}`
+                    : ""}
                 </div>
               </div>
             )}
@@ -953,12 +1219,12 @@ export default function HovitaDashboard() {
         </div>
       )}
 
-      {/* TAB 6: Cost Dashboard, Learning Loop, 12 Modules & Audit Logs */}
+      {/* TAB 6: Cost Dashboard, 12-Module Hot-Swapper, GPU Control, Learning & Audit Logs */}
       {tab === "economy" && (
         <div className="grid-2">
           <section className="card">
-            <h2>داشبورد هزینه دقیق و حلقه یادگیری هفتگی (F14)</h2>
-            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <h2>کنترل GPU، حلقه یادگیری (F14) و هزینه‌ها</h2>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
               <button
                 className="btn btn-primary"
                 disabled={busy}
@@ -970,6 +1236,34 @@ export default function HovitaDashboard() {
                 }
               >
                 اجرای حلقه یادگیری هفتگی
+              </button>
+              <button
+                className="btn btn-secondary"
+                disabled={busy}
+                onClick={() =>
+                  void runAction("دستور بیداری GPU ثبت شد", async () => {
+                    await apiCall("/api/v1/system/gpu", {
+                      method: "POST",
+                      body: JSON.stringify({ action: "wake" }),
+                    });
+                  })
+                }
+              >
+                بیدار کردن GPU
+              </button>
+              <button
+                className="btn btn-secondary"
+                disabled={busy}
+                onClick={() =>
+                  void runAction("GPU به حالت خواب (صرفه‌جویی انرژی) رفت", async () => {
+                    await apiCall("/api/v1/system/gpu", {
+                      method: "POST",
+                      body: JSON.stringify({ action: "sleep" }),
+                    });
+                  })
+                }
+              >
+                خواباندن GPU
               </button>
             </div>
             {learningReport && (
@@ -1003,14 +1297,50 @@ export default function HovitaDashboard() {
               </tbody>
             </table>
 
-            <h3 style={{ marginTop: 16 }}>۱۲ ماژول قابل‌تعویض ثبت‌شده</h3>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {Object.entries(modules).map(([modName, provs]) => (
-                <span key={modName} className="pill green mono">
-                  {modName} ({provs.length})
-                </span>
-              ))}
-            </div>
+            <h3 style={{ marginTop: 16 }}>تعویض زنده ۱۲ ماژول (بدون تغییر کد)</h3>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>ماژول</th>
+                  <th>ارائه‌دهنده فعال / جایگزین</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(modules).map(([modName, provs]) => (
+                  <tr key={modName}>
+                    <td className="mono">{modName}</td>
+                    <td>
+                      <select
+                        className="select"
+                        style={{ marginBottom: 0 }}
+                        value={activeOverrides[modName] || ""}
+                        onChange={(e) =>
+                          void runAction(
+                            `ارائه‌دهنده ماژول ${modName} تعویض شد`,
+                            async () => {
+                              await apiCall("/api/v1/modules/override", {
+                                method: "POST",
+                                body: JSON.stringify({
+                                  module_name: modName,
+                                  provider_id: e.target.value,
+                                }),
+                              });
+                            }
+                          )
+                        }
+                      >
+                        <option value="">پیش‌فرض خودکار (Free-First S0→S4)</option>
+                        {provs.map((p) => (
+                          <option key={p.provider_id} value={p.provider_id}>
+                            {p.display_name} ({p.tier})
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </section>
 
           <section className="card">
@@ -1033,7 +1363,7 @@ export default function HovitaDashboard() {
                 </tr>
               </thead>
               <tbody>
-                {logs.slice(0, 8).map((l) => (
+                {logs.slice(0, 10).map((l) => (
                   <tr key={String(l.id)}>
                     <td>{String(l.actor)}</td>
                     <td className="mono">{String(l.action)}</td>

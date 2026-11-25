@@ -58,7 +58,20 @@ test.describe("HOVITA Fullstack Proxy & SSR E2E", () => {
     expect(decideJson.status).toBe("published");
     expect(decideJson.c2pa_verified).toBe(true);
 
-    // 4. Direct Chat -> Task Extraction + Audit Integrity
+    // 4. Module hot-swap + GPU + Pause/Resume + Direct Chat -> Audit Integrity
+    const modSwap = await request.post("/api/v1/modules/override", {
+      data: { module_name: "tts", provider_id: "kokoro_82m_local" },
+    });
+    expect(modSwap.status()).toBe(200);
+    await request.post("/api/v1/modules/override", {
+      data: { module_name: "tts", provider_id: "" },
+    });
+
+    const gpuRes = await request.post("/api/v1/system/gpu", {
+      data: { action: "wake" },
+    });
+    expect(gpuRes.status()).toBe(200);
+
     const chatRes = await request.post("/api/v1/chat", {
       data: { session_id: "pw-chat", message: "این ترند جدید عطر را بررسی کن", with_voice: true },
     });

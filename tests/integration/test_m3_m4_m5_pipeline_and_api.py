@@ -309,7 +309,7 @@ def test_api_kill_switch_and_status_endpoints(db_session: Session) -> None:
 
         mods = client.get("/api/v1/modules")
         assert mods.status_code == 200
-        assert len(mods.json()) == 12
+        assert len(mods.json()["modules"]) == 12
 
         es = client.post("/api/v1/system/emergency-stop", json={"reason": "drill"})
         assert es.status_code == 200 and es.json()["kill_switch_active"] is True

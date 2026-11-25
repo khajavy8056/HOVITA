@@ -37,6 +37,9 @@ class ProviderRegistry:
     def clear_override(self, module_name: str) -> None:
         self._active_overrides.pop(module_name, None)
 
+    def list_overrides(self) -> dict[str, str]:
+        return dict(self._active_overrides)
+
     def get(self, module_name: str, provider_id: str) -> Any:
         return self._providers[module_name][provider_id]
 

@@ -121,9 +121,11 @@ class Settings(BaseSettings):
     browser_daily_read_limit: int = 100
     browser_allow_fallback_publish: bool = False
 
-    # Secret Store
+    # Secret Store & Admin Security
     secret_master_key: SecretStr = SecretStr("")
     secret_store_path: Path = Path("./data/secrets.enc.json")
+    admin_api_key: SecretStr = SecretStr("")
+    scheduler_interval_sec: int = 300
 
     def collected_secret_values(self) -> list[str]:
         """Return non-empty secret strings for log redaction."""

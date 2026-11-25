@@ -117,8 +117,13 @@ class BrowserLayer:
         self._daily_reads += 1
         screenshot_path: str | None = None
         if req.action == "visual_review_screenshot":
-            out = self.profile_dir / f"review_{int(datetime.now(UTC).timestamp())}.txt"
-            out.write_text(f"Visual review placeholder for {req.target_url}\n", encoding="utf-8")
+            from PIL import Image, ImageDraw
+
+            out = self.profile_dir / f"review_{int(datetime.now(UTC).timestamp())}.png"
+            img = Image.new("RGB", (720, 480), (16, 24, 38))
+            draw = ImageDraw.Draw(img)
+            draw.text((24, 24), f"HOVITA Visual QA Review\nURL: {req.target_url}\nPolicy: Read-Only", fill=(230, 240, 250))
+            img.save(out, format="PNG")
             screenshot_path = str(out)
 
         append_audit_log(
